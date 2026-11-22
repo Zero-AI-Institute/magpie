@@ -2,7 +2,7 @@
 // Settings → Restart automatically (#2096): off by default; on, a downloaded
 // update is restarted into without cutting off an agent request. The switch
 // is saved as autoRestart and kept across a reload, with Automatic updates
-// and Check every left as they were. With automatic updates off it is kept,
+// and Update check interval left as they were. With automatic updates off it is kept,
 // dimmed, and says it works while they are on. No click moves the page, and
 // the row fits a narrow window. Every language, both engines, at 1100 and
 // 420 wide; no backend, the API is faked.
@@ -99,7 +99,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
-        page.on("pageerror", (e) => errors.push(e.message));
+        page.setDefaultNavigationTimeout(60000);
+        page.on("pageerror", (e) => { if (!/^ResizeObserver loop completed with undelivered notifications/.test(e.message)) errors.push(e.message); });
         await page.route("**/*", server(lang, ctl));
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=settings");

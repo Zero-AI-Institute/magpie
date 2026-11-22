@@ -17,7 +17,7 @@ func allKinds() Options {
 }
 
 // Each category finds its values, as the placeholder of its kind (an IP as
-// a documentation address, a user name as a made-up one), and puts
+// a public-ip- name, a user name as a made-up one), and puts
 // them back; and leaves alone what only looks like one: versions,
 // timestamps, hashes, UUIDs, ordinary dates, model ids, URLs in code.
 func TestMoreKinds(t *testing.T) {
@@ -93,7 +93,10 @@ func TestMoreKinds(t *testing.T) {
 			t.Errorf("%q: %d masked, want %d: %q", c.in, n, len(c.gone), out)
 		}
 		for _, g := range c.gone {
-			if strings.Contains(unmarked(out), g.value) {
+			// The made-up name is eight random letters, a new key each
+			// run, and can spell a short user name: "ops" was still in
+			// "zpxopsat@…" on ubuntu CI at 500f39886 (#4345).
+			if strings.Contains(strings.ReplaceAll(unmarked(out), standInOf(g.value), ""), g.value) {
 				t.Errorf("%q: %q still in %q", c.in, g.value, out)
 			}
 			p := placeholder(g.kind, g.value)
@@ -101,7 +104,7 @@ func TestMoreKinds(t *testing.T) {
 				p = standInOf(g.value) // a made-up name (shape.go)
 			}
 			if at, n, ok := ipStandIns(g.value); g.kind == "IP" && ok {
-				for i := 0; i < n; i++ { // a documentation address (shape.go)
+				for i := 0; i < n; i++ { // a public-ip- name (shape.go)
 					if strings.Contains(out, at(i)) {
 						p = at(i)
 						break

@@ -65,8 +65,8 @@ function serve(lang, saves) {
 }
 
 const words = {
-  en: { hint: "Click a model to pick just it", tip: "Click to pick just this model", save: "Save", picked: "Agents see the models picked." },
-  zh: { hint: "点击模型可单选", tip: "点击只选这个模型", save: "保存", picked: "Agent 看到的是已勾选的模型。" },
+  en: { hint: "Click a dashed one to pick just it", tip: "Click to pick just this model", save: "Save", picked: "Agents see the models picked." },
+  zh: { hint: "点击虚线框的模型可单选", tip: "点击只选这个模型", save: "保存", picked: "Agent 看到的是已勾选的模型。" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -79,6 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await t.test(`${lang}: ${name}`, async () => {
           const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [], saves = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serve(lang, saves));
@@ -133,6 +134,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(`${lang}: Cline's 4 free models clicked till ticked save 4 (#702)`, async () => {
         const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], saves = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, saves));

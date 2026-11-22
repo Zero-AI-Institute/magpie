@@ -51,7 +51,7 @@ function serve(lang, scene) {
 }
 
 const chip = { en: "By weight", zh: "按权重", ja: "重み付け", de: "Nach Gewicht" };
-const smart = { en: "Smart", zh: "智能", ja: "スマート", de: "Intelligent" };
+const smart = { en: "Quota first", zh: "额度优先", ja: "枠優先", de: "Kontingent zuerst" };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh", "ja", "de"]) {
@@ -60,6 +60,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 900 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.route("**/*", serve(lang, "weight"));
@@ -77,7 +78,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".rt-prov span").filter({ hasText: chip[lang] }).first().waitFor();
       const say = (key, vars = {}) => page.evaluate(([lang, key, vars]) => ((lang !== "en" && I18N[lang]?.[key]) || key).replace(/\{(\w+)\}/g, (_, k) => vars[k]), [lang, key, vars]);
       assert.equal((await page.locator(".rt-mode").textContent()).trim(),
-        await say("Requests spread over the keys by the weight set beside each: a key weighing 3 takes three requests for every one a key weighing 1 takes, evenly over a few requests. One that fails is passed over while it rests, and the others share its requests; a conversation stays with its key as Stays says."));
+        await say("Requests spread over the keys or accounts by the weight set beside each: one weighing 3 takes three requests for every one weighing 1 takes, evenly over a few requests. One that fails is passed over while it rests, and the others share its requests; a conversation stays with it as Stays says."));
       // the story says whose share went first
       await page.locator(".rt-steps li.why").first().waitFor();
       assert.equal((await page.locator(".rt-steps li.why").first().textContent()).trim(),
@@ -90,6 +91,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 900 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.route("**/*", serve(lang, "smart"));
@@ -101,7 +103,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await page.locator(".rt-hub i").textContent()).trim(), smart[lang]);
       assert.equal((await page.locator(".rt-mode").textContent()).trim(),
         await page.evaluate(([lang, key]) => (lang !== "en" && I18N[lang]?.[key]) || key, [lang,
-          "Smart: keys that suit the request go first — one made for the model's own API — then in their order. One resting after a failure goes last."]));
+          "Quota first: keys that suit the request go first — one made for the model's own API — then in their order. One resting after a failure goes last."]));
       assert.deepEqual(errors, []);
     });
   }

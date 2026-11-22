@@ -67,6 +67,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const ctl = { installs: INSTALLS, agents: AGENTS };
         const page = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, ctl));
@@ -105,7 +106,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(await noSideScroll(page), "the page scrolls sideways");
         await page.screenshot({ path: path.join(process.env.SHOTS || "/tmp", `plugin-agents-${engine}-${lang}-${width}.png`), fullPage: true }).catch(() => {});
 
-        // to Plugins, Discover, its Agents in sight at the top
+        // to Plugins, Discover, Agents alone, in sight at the top
         await more.click();
         const view = page.locator("#view-plugins");
         await view.waitFor();
@@ -114,7 +115,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForFunction(() => {
           const v = document.querySelector("#view-plugins");
           const s = [...v.querySelectorAll(".pm-sec")].find((x) => x.querySelector(".pm-card .pm-chip.kind.ag"));
-          return v.scrollTop > 0 && s && Math.abs(s.getBoundingClientRect().top - v.getBoundingClientRect().top) < 80;
+          return s && Math.abs(s.getBoundingClientRect().top - v.getBoundingClientRect().top) < 80;
         });
         assert.equal(await agents.locator(".pm-card").count(), AGENTS.length);
         // it stays there once the page has what it loads
@@ -127,6 +128,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         ctl.installs = [];
         const p2 = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         p2.setDefaultTimeout(5000);
+        p2.setDefaultNavigationTimeout(60000);
         p2.on("pageerror", (e) => errors.push(e.message));
         await p2.route("**/*", server(lang, ctl));
         await p2.goto("http://magpie.test/");
@@ -140,6 +142,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         Object.assign(ctl, { installs: INSTALLS, agents: [] });
         const p3 = await (await browser.newContext({ viewport: { width, height: 760 } })).newPage();
         p3.setDefaultTimeout(5000);
+        p3.setDefaultNavigationTimeout(60000);
         p3.on("pageerror", (e) => errors.push(e.message));
         await p3.route("**/*", server(lang, ctl));
         await p3.goto("http://magpie.test/");

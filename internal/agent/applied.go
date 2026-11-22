@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/provider"
@@ -61,12 +62,21 @@ func appliedSave(m map[string]applied) {
 	b, _ := json.MarshalIndent(m, "", "  ")
 	os.MkdirAll(filepath.Dir(appliedPath()), 0o755)
 	os.WriteFile(appliedPath(), b, 0o600)
+	filememo.Look(appliedPath())
 }
 
+// appliedOf is what magpie set on agent id. Every look at an agent's
+// drift asks it, for every agent a poll lists, so the file is parsed once
+// a change and the map is shared: callers only read it.
 func appliedOf(id string) applied {
 	appliedMu.Lock()
 	defer appliedMu.Unlock()
-	return appliedLoad()[id]
+	m, _ := filememo.Read("applied", appliedPath(), func(b []byte) (map[string]applied, error) {
+		out := map[string]applied{}
+		json.Unmarshal(b, &out)
+		return out, nil
+	})
+	return m[id]
 }
 
 // record keeps what a field reads after magpie set it; a field put back to
@@ -119,7 +129,10 @@ func (a *Agent) Apply(key, v string) error {
 			record(a.ID, k, now[k])
 		}
 	}
-	record(a.ID, f.Key, f.Get())
+	// the user's own setting isn't magpie's to put back or take out
+	if !f.Own {
+		record(a.ID, f.Key, f.Get())
+	}
 	// magpie picked in by the user's own hand (magpie model, a pick in
 	// the CLI) connects it again
 	if a.Wired() {
@@ -163,6 +176,22 @@ var started = time.Now()
 // A field moved from one magpie model to another (the agent's own picker)
 // isn't drift; one moved off magpie is.
 func (a *Agent) Drift() *Drift {
+	return a.drift(nil)
+}
+
+// DriftShown is Drift for the window's poll, which only shows it: whether
+// a value is one of magpie's models is remembered per value while
+// provider.StampNow stays the same, shownValuesFor at most. Each poll
+// asked every field's whole option list for it, built again once a
+// minute: 27 MB of the 50 MB a magpie with real accounts allocated in
+// three minutes with the window up. What the stamp can't see (a provider
+// resting, a model retired by its date) shows within shownValuesFor;
+// Reapply, rewiring and a launch ask Drift, which reads them now.
+func (a *Agent) DriftShown() *Drift {
+	return a.drift(&shownValues)
+}
+
+func (a *Agent) drift(memo *valueMemo) *Drift {
 	if a.Native != nil {
 		s := a.Native.Read()
 		if s.Provider == "invalid" {
@@ -174,11 +203,18 @@ func (a *Agent) Drift() *Drift {
 		return nil
 	}
 	vals := a.Values()
+	opts := fieldOptions{}
+	valueIn := func(a *Agent, f Field, v string, vals map[string]string, opts fieldOptions) bool {
+		if memo == nil {
+			return magpieValueIn(a, f, v, vals, opts)
+		}
+		return memo.in(a, f, v, vals, opts)
+	}
 	// the field on one of magpie's models: where drift shows, and what
 	// setting it again sets
 	on, onMagpie := a.Fields[0], false
 	for _, f := range a.Fields {
-		if magpieValue(a, f, vals[f.Key], vals) {
+		if valueIn(a, f, vals[f.Key], vals, opts) {
 			on, onMagpie = f, true
 			break
 		}
@@ -212,7 +248,7 @@ func (a *Agent) Drift() *Drift {
 		if now == "" && f.Follows != "" {
 			now = vals[f.Follows]
 		}
-		if !ok || picked || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
+		if !ok || picked || now == want || !valueIn(a, f, want, vals, opts) || valueIn(a, f, now, vals, opts) || sameGroup(want, now) {
 			continue
 		}
 		return &Drift{Kind: "replaced", Field: f.Key, Now: vals[f.Key], Want: want,
@@ -266,11 +302,15 @@ func (a *Agent) theInstalled() bool {
 	if !elsewhere() || a.Path == "" {
 		return false
 	}
-	b, err := edit.Read(a.Path)
+	// the bytes filememo keeps, looked at in place: a copy of the file and
+	// two strings of it for each field's drift was 5 MB a poll of a Codex
+	// config.toml of 1.5 MB, in a magpie beside the installed one (a dev
+	// build)
+	b, err := filememo.Read("bytes", a.Path, func(b []byte) ([]byte, error) { return b, nil })
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(b), hostOf(installedURL())) && !strings.Contains(string(b), hostOf(gateway.URL()))
+	return bytes.Contains(b, []byte(hostOf(installedURL()))) && !bytes.Contains(b, []byte(hostOf(gateway.URL())))
 }
 
 // bypassed: the agent was used — while this gateway was up and after magpie
@@ -291,7 +331,85 @@ func bypassed(used, applied, seen time.Time) bool {
 // its suffix after the model (SplitSuffix) aside; a list of models is the
 // user's own.
 func magpieValue(a *Agent, f Field, v string, vals map[string]string) bool {
+	return magpieValueIn(a, f, v, vals, nil)
+}
+
+// fieldOptions keeps each field's options, by its key, for one look at an
+// agent's values: Drift asks magpieValue up to three times a field, and
+// Claude Code's options (claudeViaMagpie, its own models) were made anew
+// each time, 35 MB of what forty polls with real accounts allocated.
+type fieldOptions map[string][]Option
+
+func (o fieldOptions) of(f Field, vals map[string]string) []Option {
+	if o == nil {
+		return f.Options(vals)
+	}
+	opts, ok := o[f.Key]
+	if !ok {
+		opts = f.Options(vals)
+		o[f.Key] = opts
+	}
+	return opts
+}
+
+// valueMemo remembers magpieValueIn's answers (DriftShown).
+type valueMemo struct {
+	sync.Mutex
+	stamp provider.Stamp
+	at    time.Time
+	m     map[string]bool
+}
+
+var shownValues valueMemo
+
+// shownValuesFor is how long DriftShown keeps an answer while
+// provider.StampNow says nothing changed.
+const shownValuesFor = 5 * time.Minute
+
+func (m *valueMemo) in(a *Agent, f Field, v string, vals map[string]string, opts fieldOptions) bool {
 	if v == "" {
+		return false
+	}
+	var k strings.Builder
+	k.WriteString(a.ID + "\x00" + f.Key + "\x00" + v)
+	keys := make([]string, 0, len(vals))
+	for kk := range vals {
+		keys = append(keys, kk)
+	}
+	slices.Sort(keys)
+	for _, kk := range keys {
+		k.WriteString("\x00" + kk + "=" + vals[kk])
+	}
+	key := k.String()
+	stamp := provider.StampNow()
+	m.Lock()
+	if m.stamp != stamp || time.Since(m.at) >= shownValuesFor || len(m.m) > 512 {
+		m.stamp, m.at, m.m = stamp, time.Now(), nil
+	}
+	yes, ok := m.m[key]
+	m.Unlock()
+	if ok {
+		return yes
+	}
+	// the stamp is read before the answer: a change while it is moves it
+	// past the one kept, and the next call asks again
+	yes = magpieValueIn(a, f, v, vals, opts)
+	m.Lock()
+	if m.stamp == stamp {
+		if m.m == nil {
+			m.m = map[string]bool{}
+		}
+		m.m[key] = yes
+	}
+	m.Unlock()
+	return yes
+}
+
+// magpieValueIn is magpieValue reading a field's options from opts, made
+// for the same vals; nil reads them anew.
+func magpieValueIn(a *Agent, f Field, v string, vals map[string]string, opts fieldOptions) bool {
+	// the user's own setting (a permission mode) is never one of magpie's
+	if v == "" || f.Own {
 		return false
 	}
 	v, _, one := a.split(v)
@@ -309,7 +427,7 @@ func magpieValue(a *Agent, f Field, v string, vals map[string]string) bool {
 	if f.Options == nil {
 		return false
 	}
-	for _, o := range f.Options(vals) {
+	for _, o := range opts.of(f, vals) {
 		if o.Value == v {
 			return o.Ref != ""
 		}
@@ -441,7 +559,7 @@ func (a *Agent) forgetSetUp() {
 // keeps an entry in). A field set in magpie to a model of the agent's own,
 // or its thinking level, doesn't set it up.
 func (a *Agent) setUp() bool {
-	if stashLoad()[a.ID+".connect.was"] != "" {
+	if stashShared()[a.ID+".connect.was"] != "" {
 		return true
 	}
 	rec := appliedOf(a.ID)
@@ -504,7 +622,8 @@ func (a *Agent) Pick(key, v string) error {
 		}
 		return a.Apply(key, value)
 	}
-	if f := a.Field(key); f != nil && !a.Wired() {
+	// the user's own setting never connects the agent to magpie
+	if f := a.Field(key); f != nil && !f.Own && !a.Wired() {
 		vals := a.Values()
 		vals[key] = v
 		if v == magpieID || magpieValue(a, *f, v, vals) {
@@ -542,7 +661,7 @@ func (e *NoModelsError) Error() string {
 type AllHiddenError struct{ Agent string }
 
 func (e *AllHiddenError) Error() string {
-	return "None of magpie's models is left in " + e.Agent + "'s model list: pick one under Model list → Pick on the Agents page, then connect " + e.Agent
+	return "None of magpie's models is left in " + e.Agent + "'s model list: pick one under Model list › Pick on the Agents page, then connect " + e.Agent
 }
 
 func (a *Agent) Connect() error {
@@ -566,6 +685,8 @@ func (a *Agent) Connect() error {
 //     own models in its list (the newest, for Claude Code), through magpie
 //   - "first": magpie has none of the model it is on: the first on the
 //     account it is signed in to, else a subscription's, else the first
+//   - "remote": the models a Remote magpie's same agent is on
+//     (remote_picks.go)
 //
 // Field and Value are the field set and what it was set to, where Connect
 // picked one model ("" for kept, again and joined).
@@ -603,7 +724,7 @@ const disconnectedKey = ".disconnected"
 
 // Disconnected reports whether the user disconnected the agent and hasn't
 // connected it since.
-func (a *Agent) Disconnected() bool { return stashLoad()[a.ID+disconnectedKey] == "1" }
+func (a *Agent) Disconnected() bool { return stashShared()[a.ID+disconnectedKey] == "1" }
 
 // noModelLeft says why there is no model of magpie's to connect the agent
 // to: none added yet (NoModelsError), or every one taken out of its lists
@@ -642,6 +763,10 @@ func (a *Agent) connect() (Connection, error) {
 		if ok, err := a.Join(); ok || err != nil {
 			return Connection{How: "joined"}, err
 		}
+	}
+	// the models the Remote magpie's same agent is on (remote_picks.go)
+	if c, ok, err := a.connectRemote(); ok || err != nil {
+		return c, err
 	}
 	// the field magpie is picked in: the one listing magpie's models (for
 	// Gemini CLI its model, its first field being how it signs in), else one
@@ -820,6 +945,9 @@ func (a *Agent) Disconnect() (err error) {
 		}
 	}
 	for _, f := range a.Fields {
+		if f.Own {
+			continue
+		}
 		vals := a.Values()
 		v := vals[f.Key]
 		// set by magpie: as it set it, or its group by the model's name
@@ -846,6 +974,10 @@ func (a *Agent) Disconnect() (err error) {
 		}
 	}
 	for _, f := range a.Fields {
+		// the user's own setting is as they left it, not as it was at connect
+		if f.Own {
+			continue
+		}
 		if w := was[f.Key]; w != "" && after[f.Key] == "" && w != magpieID && !magpieValue(a, f, w, was) {
 			if err := f.Set(w); err != nil {
 				return fmt.Errorf("%s: %w", f.Label, err)
@@ -920,10 +1052,18 @@ func (a *Agent) reconnect(now map[string]string) (bool, error) {
 	// alone, Codex was beside its sign-in and not joined, so picking one
 	// of its own on the Agents page took it off magpie, every OpenAI model
 	// then said direct, and after a group again they said via magpie
-	// though a pick still went straight to OpenAI (NancyTom18 on X)
+	// though a pick still went straight to OpenAI (NancyTom18 on X). One
+	// that can't join now (a provider of the user's own, magpie API) is
+	// connected as at first unless its model was one of magpie's, which
+	// routes it: its subagents' or memories' model put back alone read as
+	// connected while its own model stayed off magpie (#3868)
 	if a.Join != nil {
-		if _, err := a.Join(); err != nil {
+		ok, err := a.Join()
+		if err != nil {
 			return true, err
+		}
+		if !ok && !slices.Contains(rec.Routed, a.Fields[0].Key) {
+			return false, nil
 		}
 	}
 	// the models on magpie first, as Connect sets them (setting Gemini
@@ -957,9 +1097,9 @@ func (a *Agent) reconnect(now map[string]string) (bool, error) {
 
 // lastJSONLTime reads the newest Unix timestamp (seconds or milliseconds)
 // under key in the last lines of a prompt log, passing over the lines whose
-// text (under textKey) is a slash command: those an agent answers itself.
-// Zero if there is none.
-func lastJSONLTime(path, key, textKey string) time.Time {
+// text (under textKey) is a slash command: those an agent answers itself,
+// and those skip, when given, says magpie's own. Zero if there is none.
+func lastJSONLTime(path, key, textKey string, skip func(map[string]json.RawMessage) bool) time.Time {
 	f, err := os.Open(path)
 	if err != nil {
 		return time.Time{}
@@ -979,6 +1119,9 @@ func lastJSONLTime(path, key, textKey string) time.Time {
 		}
 		var text string
 		if json.Unmarshal(m[textKey], &text) == nil && strings.HasPrefix(strings.TrimSpace(text), "/") {
+			continue
+		}
+		if skip != nil && skip(m) {
 			continue
 		}
 		n, err := strconv.ParseInt(string(m[key]), 10, 64)
@@ -1013,15 +1156,44 @@ func wiringOff(name, file string, get func(string) (string, bool), kvs ...string
 		if keyHolds(v, want) || v != "" && reachesMagpie(v, want) {
 			continue
 		}
-		where := name + "'s " + k + " (" + filepath.Base(file) + ")"
-		switch {
-		case v == "":
-			return where + " is gone, so it no longer reaches magpie"
-		case strings.Contains(strings.ToLower(k), "url"):
-			return where + " is " + v + ", not magpie's gateway at " + want
-		default:
-			return where + " was changed, so magpie's gateway won't take its requests"
-		}
+		return whatsOff(name, file, k, v, want)
 	}
 	return ""
+}
+
+// whatsOff is what wiringOff says of k in an agent's config, v where
+// magpie wrote want.
+func whatsOff(name, file, k, v, want string) string {
+	where := name + "'s " + k + " (" + filepath.Base(file) + ")"
+	switch {
+	case v == "":
+		return where + " is gone, so it no longer reaches magpie"
+	case strings.Contains(strings.ToLower(k), "url"):
+		return where + " is " + v + ", not magpie's gateway at " + want
+	default:
+		return where + " was changed, so magpie's gateway won't take its requests"
+	}
+}
+
+// SetToGroup reports whether magpie set one of the agent's fields to the
+// routing group gid ("group/<id>"), by its id or its model's name (#750),
+// at an effort or not: the user picked that group for the agent. The
+// gateway then keeps a bare name the agent asks for by on the group,
+// rather than on the agent's own subscription. For gateway.SetToGroup.
+func SetToGroup(agent, gid string) bool {
+	if agent == "" || gid == "" {
+		return false
+	}
+	gid = provider.CanonicalRef(gid)
+	for _, v := range appliedOf(agent).Fields {
+		if g := groupNamed(v); g != "" && provider.CanonicalRef(g) == gid {
+			return true
+		}
+		if i := strings.LastIndex(v, ":"); i > 0 && slices.Contains(provider.MemberEfforts, strings.ToLower(v[i+1:])) {
+			if g := groupNamed(v[:i]); g != "" && provider.CanonicalRef(g) == gid {
+				return true
+			}
+		}
+	}
+	return false
 }

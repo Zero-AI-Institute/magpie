@@ -18,11 +18,11 @@ type KV struct {
 
 // GetJSON reads a dot-separated key path from a JSON or JSONC file.
 func GetJSON(path, keyPath string) (string, bool) {
-	raw, err := readHeld(path)
+	raw, err := jsonHeld(path)
 	if err != nil || len(raw) == 0 {
 		return "", false
 	}
-	r := gjson.GetBytes(jsonc.ToJSONInPlace(raw), keyPath)
+	r := gjson.GetBytes(raw, keyPath)
 	if !r.Exists() {
 		return "", false
 	}
@@ -33,11 +33,11 @@ func GetJSON(path, keyPath string) (string, bool) {
 // the file (a string with its quotes, a number, true), for putting back
 // exactly as it was (a json.RawMessage given to SetJSON).
 func GetJSONRaw(path, keyPath string) (string, bool) {
-	raw, err := readHeld(path)
+	raw, err := jsonHeld(path)
 	if err != nil || len(raw) == 0 {
 		return "", false
 	}
-	r := gjson.GetBytes(jsonc.ToJSONInPlace(raw), keyPath)
+	r := gjson.GetBytes(raw, keyPath)
 	if !r.Exists() {
 		return "", false
 	}
@@ -165,8 +165,22 @@ func splitPath(keyPath string) []string {
 	return append(parts, keyPath[start:])
 }
 
-// unescapeKey is a key path's part as the key it names.
-func unescapeKey(part string) string { return strings.ReplaceAll(part, `\.`, ".") }
+// unescapeKey is a key path's part as the key it names: each character
+// after a backslash as it is, as gjson.Escape writes them (a model id's
+// '.', a '*' or '?' gjson would match on).
+func unescapeKey(part string) string {
+	if !strings.Contains(part, `\`) {
+		return part
+	}
+	var b strings.Builder
+	for i := 0; i < len(part); i++ {
+		if part[i] == '\\' && i+1 < len(part) {
+			i++
+		}
+		b.WriteByte(part[i])
+	}
+	return b.String()
+}
 
 func splice(raw []byte, at, n int, with []byte) ([]byte, error) {
 	out := make([]byte, 0, len(raw)-n+len(with))

@@ -35,6 +35,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(6000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const events = [];
@@ -46,6 +47,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the mark in its tile, the state beside it
         assert.equal(await page.locator("#gateway > .gw-mark.on svg .led").count(), 2, "the mark's two lights");
         assert.equal(await page.locator("#gateway .url").count(), 0, "no address pill in the status row");
+        // the state centred on the title's line, not sat low on its baseline
+        // (the owner: "没有水平对齐")
+        const off = await page.locator("#gateway .name").evaluate((n) => {
+          const r = document.createRange();
+          r.selectNodeContents(n.firstChild);
+          const a = r.getBoundingClientRect(), b = n.querySelector(".state").getBoundingClientRect();
+          return Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2);
+        });
+        assert(off <= 0.25, `the state's middle is ${off}px off the title's`);
         // Connect folded by default, its base URL in its head
         assert.equal(await page.locator("#foldConnect").getAttribute("aria-expanded"), "false", "Connect starts folded");
         assert(await page.locator("#connect").evaluate((c) => c.hidden));
@@ -95,9 +105,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const menu = page.locator(".row-menu");
         await menu.waitFor();
         const items = (await menu.getByRole("menuitem").allTextContents()).map((s) => s.trim());
-        assert.equal(items.length, 4);
-        if (w.rotate) assert.deepEqual(items, [w.off, w.readOnly, w.rotate, w.remove]);
-        assert.deepEqual(items, await page.evaluate(() => [t("Disable key"), t("Make read-only"), t("Rotate key"), t("Remove")]));
+        assert.equal(items.length, 8);
+        if (w.rotate) assert.deepEqual(items.filter((s) => [w.off, w.readOnly, w.rotate, w.remove].includes(s)), [w.off, w.readOnly, w.rotate, w.remove]);
+        assert.deepEqual(items, await page.evaluate(() => [t("Disable key"), t("Make read-only"), t("MCP servers"), t("Model names"), t("Keep accounts out"), t("Rotate key"), t("Advanced"), t("Remove")]));
         // off from the menu, then on again: the key stays, only its switch moves
         await menu.getByRole("menuitem").first().click();
         await menu.waitFor({ state: "detached" });

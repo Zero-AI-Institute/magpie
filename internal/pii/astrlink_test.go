@@ -366,3 +366,79 @@ func TestGuardFilesAreThePublishers(t *testing.T) {
 		}
 	}
 }
+
+// panicFinder panics on a text holding "boom", as the tokenizer did on
+// #4553's stray byte, and reads every other.
+type panicFinder struct{ fakeFinder }
+
+func (f panicFinder) Find(text string) []guard.Span {
+	if strings.Contains(text, "boom") {
+		var s []int
+		_ = s[3] // the slice bounds of #4553's panic
+	}
+	return f.fakeFinder.Find(text)
+}
+
+// A model that panics reading one request fails that request, held back
+// as for a model that failed, instead of ending magpie from the read's
+// goroutine (#4553), and isn't counted as failed for the requests after
+// it, which it reads.
+func TestGuardPanicFailsOnlyItsRequest(t *testing.T) {
+	guardSandbox(t)
+	fakeGuardFiles(t)
+	var reads atomic.Int32
+	guardLoad = func(string) (spanFinder, error) {
+		return panicFinder{fakeFinder{map[string]string{"13800138000": "phone"}, &reads}}, nil
+	}
+	_, err := Of(AstrLinkGuard).Find(context.Background(), []string{"boom \xff"})
+	if err == nil || !strings.Contains(err.Error(), "failed reading this request") {
+		t.Fatalf("err = %v", err)
+	}
+	got, err := Of(AstrLinkGuard).Find(context.Background(), []string{"call 13800138000"})
+	if err != nil || len(got) != 1 || len(got[0]) != 1 || got[0][0].Label != "private_phone" {
+		t.Fatalf("the next request: %v, %v", got, err)
+	}
+	if st := Of(AstrLinkGuard).Now(); st.Failed != "" {
+		t.Fatalf("Now = %+v after one request's panic", st)
+	}
+}
+
+// Now says when AstrLink Guard runs under Rosetta, for Settings → Privacy
+// to say why it is slow (cdredfox on Discord: 150% of a core in the Intel
+// build on Apple silicon); Privacy Filter's pf-serve is Apple silicon's
+// there (target), so it says nothing.
+func TestGuardNowSaysRosetta(t *testing.T) {
+	guardSandbox(t)
+	was := translated
+	t.Cleanup(func() { translated = was })
+	for _, tr := range []bool{false, true} {
+		translated = func() bool { return tr }
+		if st := Of(AstrLinkGuard).Now(); st.Rosetta != tr {
+			t.Errorf("translated=%v: AstrLink Guard's Rosetta = %v", tr, st.Rosetta)
+		}
+	}
+	translated = func() bool { return true }
+	if st := Of(PrivacyFilter).Now(); st.Rosetta {
+		t.Error("Privacy Filter says Rosetta, though its pf-serve is Apple silicon's")
+	}
+}
+
+// Now says when AstrLink Guard runs under Windows on Arm's x64 emulation,
+// as under Rosetta: the next update installs the arm64 magpie, where it
+// runs natively. Privacy Filter's pf-serve is x64 on either build, so it
+// says nothing.
+func TestGuardNowSaysEmulated(t *testing.T) {
+	guardSandbox(t)
+	was := emulated
+	t.Cleanup(func() { emulated = was })
+	for _, em := range []bool{false, true} {
+		emulated = func() bool { return em }
+		if st := Of(AstrLinkGuard).Now(); st.Emulated != em || st.Rosetta {
+			t.Errorf("emulated=%v: AstrLink Guard's Emulated = %v, Rosetta = %v", em, st.Emulated, st.Rosetta)
+		}
+	}
+	emulated = func() bool { return true }
+	if st := Of(PrivacyFilter).Now(); st.Emulated {
+		t.Error("Privacy Filter says emulated, though the update leaves its pf-serve x64")
+	}
+}

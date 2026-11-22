@@ -2,13 +2,16 @@ package gui
 
 import (
 	"net/http"
+	"time"
 
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
 
 // speedJSON is how fast a model answered on one provider over the last
 // seven days, from the usage ledger: the mean time to its first token and
-// how fast it wrote after it, the numbers the Requests page shows per call.
+// how fast it wrote after it, the median of the speeds the Requests page
+// shows per call (usage.Totals.Speed).
 type speedJSON struct {
 	TTFT int64   `json:"ttft,omitempty"` // ms
 	TPS  float64 `json:"tps,omitempty"`  // output tokens a second after the first
@@ -40,5 +43,13 @@ func modelSpeeds() map[string]speedJSON {
 func speedsAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/model-speeds", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, modelSpeeds())
+	})
+	// how busy each model's plugin says it is now, by the same ref
+	// lowercased, for the Agents page's model and its picker (axelburks
+	// on Discord: only the provider editor showed it). Read when a picker
+	// opens and with the Agents page's drift check, each at most every
+	// 30s; with no plugin reporting it is an empty map at once.
+	mux.HandleFunc("GET /api/model-loads", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, provider.ModelLoads(time.Now()))
 	})
 }

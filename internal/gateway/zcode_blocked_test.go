@@ -147,9 +147,9 @@ func TestRelayRefusalSaysWhatItWas(t *testing.T) {
 		name, ct, body string
 		want           []string
 	}{
-		{"cloudflare", "text/html; charset=UTF-8", cf, []string{"403 Forbidden: a web page, not an API reply: “Attention Required! | Cloudflare”", provider.BlockedHint}},
-		{"page", "text/html", "<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>", []string{"403 Forbidden: a web page, not an API reply: “403 Forbidden”"}},
-		{"empty", "", "", []string{"403 Forbidden: " + provider.NoDetails}},
+		{"cloudflare", "text/html; charset=UTF-8", cf, []string{"Relay: a web page, not an API reply: “Attention Required! | Cloudflare” (HTTP 403)", provider.BlockedHint}},
+		{"page", "text/html", "<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>", []string{"Relay: a web page, not an API reply: “403 Forbidden” (HTTP 403)"}},
+		{"empty", "", "", []string{"Relay: HTTP 403\nmagpie: " + provider.NoDetails}},
 		{"json", "application/json", `{"error":{"message":"this key may not use gpt-5.5","type":"forbidden"}}`, []string{"this key may not use gpt-5.5"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -194,18 +194,19 @@ func TestRelayRefusalSaysWhatItWas(t *testing.T) {
 // (maralica on Discord, "magpie-grok"): it is asked for its own model id,
 // never one magpie named, with WorkBuddy's User-Agent as sent, and
 // whatever reason its 403 gives reaches the agent: plain text, JSON, a
-// page with no title, a page's fragment, an XML error.
+// page with no title, a page's fragment, an XML error. The relay's words
+// come first, with its status, as upstreamTold says them.
 func TestChatRelayRefusalSaysWhy(t *testing.T) {
 	const ua = "WorkBuddy/5.9.2 WorkBuddy/5.9.2 CLI/2.165.0"
 	for _, c := range []struct {
 		name, ct, body, want string
 	}{
-		{"text", "text/plain", "only Claude Code and Codex CLI are allowed", "magpie-grok: 403 Forbidden: only Claude Code and Codex CLI are allowed"},
-		{"json", "application/json", `{"error":{"message":"client WorkBuddy is not allowed","type":"forbidden"}}`, "magpie-grok: client WorkBuddy is not allowed"},
-		{"untitled page", "text/html", "<html><body><h1>403</h1><p>only Claude Code &amp; Codex CLI are allowed</p></body></html>", "magpie-grok: 403 Forbidden: a web page, not an API reply: “403 only Claude Code & Codex CLI are allowed”"},
-		{"fragment", "text/html", "<h1>Forbidden</h1>\n<p>client not allowed</p>", "magpie-grok: 403 Forbidden: Forbidden client not allowed"},
-		{"xml", "application/xml", `<?xml version="1.0"?><Error><Code>ClientNotAllowed</Code><Message>client not allowed</Message></Error>`, "magpie-grok: 403 Forbidden: ClientNotAllowed client not allowed"},
-		{"empty", "", "", "magpie-grok: 403 Forbidden: " + provider.NoDetails},
+		{"text", "text/plain", "only Claude Code and Codex CLI are allowed", "magpie-grok: only Claude Code and Codex CLI are allowed (HTTP 403)"},
+		{"json", "application/json", `{"error":{"message":"client WorkBuddy is not allowed","type":"forbidden"}}`, "magpie-grok: client WorkBuddy is not allowed (HTTP 403, forbidden)"},
+		{"untitled page", "text/html", "<html><body><h1>403</h1><p>only Claude Code &amp; Codex CLI are allowed</p></body></html>", "magpie-grok: a web page, not an API reply: “403 only Claude Code & Codex CLI are allowed” (HTTP 403)"},
+		{"fragment", "text/html", "<h1>Forbidden</h1>\n<p>client not allowed</p>", "magpie-grok: Forbidden client not allowed (HTTP 403)"},
+		{"xml", "application/xml", `<?xml version="1.0"?><Error><Code>ClientNotAllowed</Code><Message>client not allowed</Message></Error>`, "magpie-grok: ClientNotAllowed client not allowed (HTTP 403)"},
+		{"empty", "", "", "magpie-grok: HTTP 403\nmagpie: " + provider.NoDetails},
 	} {
 		for _, model := range []string{"magpie-grok/grok-4.7", "group/g"} {
 			t.Run(c.name+" "+model, func(t *testing.T) {
@@ -225,7 +226,7 @@ func TestChatRelayRefusalSaysWhy(t *testing.T) {
 					io.WriteString(w, c.body)
 				}))
 				t.Cleanup(relay.Close)
-				if err := provider.Save(provider.Provider{ID: "magpie-grok", Name: "magpie-grok", Key: "k", Models: []string{"grok-4.7"}, Chat: relay.URL + "/v1", PassUserAgent: true}); err != nil {
+				if err := provider.Save(provider.Provider{ID: "magpie-grok", Name: "magpie-grok", Key: "k", Models: []string{"grok-4.7"}, Chat: relay.URL + "/v1"}); err != nil {
 					t.Fatal(err)
 				}
 				if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"magpie-grok/grok-4.7"}, Routing: provider.Ordered}); err != nil {
@@ -282,5 +283,56 @@ func TestZCodeStartPlanBlockRestsRestricted(t *testing.T) {
 	}
 	if f := failureOf(c, 200, body); f == failRestricted {
 		t.Fatal("a 200 read as restricted")
+	}
+}
+
+// The ZCode plugin's 3012 answer keeps ZCode's own words, "request has
+// been blocked due to unusual activity", in front of ZCodeRestrictedHint.
+// Served through the plugin, it reaches the agent and the trace with the
+// hint, never as a firewall blocking the address (BlockedHint), and the
+// account rests as restricted. Before, the gateway read ZCode's words as
+// Alibaba Cloud's block page, told the agent to change networks and
+// rested the account as any failure (windy_66454 on Discord, 10-31). The
+// plugin's words for the page itself are still the firewall's.
+func TestZCodeRiskControlNotToldAsFirewall(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, says, notSays, why string
+	}{
+		{"risk control", `{"type":"error","error":{"type":"permission_error","message":"request has been blocked due to unusual activity. (405, code 3012) — ` + provider.ZCodeRestrictedHint + `"}}`, provider.ZCodeRestrictedHint, provider.BlockedHint, failRestricted},
+		{"block page", `{"type":"error","error":{"type":"permission_error","message":"405 Method Not Allowed — ` + provider.BlockedHint + `"}}`, provider.BlockedHint, provider.ZCodeRestrictedHint, failOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FAKE_ZCODE", "1")
+			movedFake(t, "zcode", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				io.WriteString(w, tc.body)
+			}))
+			p, err := provider.Find("zcode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := candidate{p: *p, rest: "zcode", model: "GLM-5.3"}
+			b := &scripted{replies: []reply{{200, "", chatOK}}}
+			scriptedOn(t, "b", provider.Chat, b)
+			if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"zcode/GLM-5.3", "b/m"}, Routing: provider.Ordered}); err != nil {
+				t.Fatal(err)
+			}
+			s := New()
+			if code, body := postAs(t, s, "", `{"model":"group/g","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
+				t.Fatalf("group request: %d %s", code, body)
+			}
+			tries := s.trace.routes[len(s.trace.routes)-1].Tries
+			if len(tries) != 2 || tries[0].Rest == nil {
+				t.Fatalf("tries: %+v", tries)
+			}
+			tr := tries[0]
+			if !strings.Contains(tr.Error, tc.says) || strings.Contains(tr.Error, tc.notSays) {
+				t.Fatalf("told %q", tr.Error)
+			}
+			if tr.Fail != tc.why || tr.Rest.Why != tc.why || tr.Rest.Key != c.restKey() {
+				t.Fatalf("failed %q, rested %+v", tr.Fail, *tr.Rest)
+			}
+		})
 	}
 }

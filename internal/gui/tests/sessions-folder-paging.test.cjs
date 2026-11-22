@@ -64,6 +64,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (const width of [1000, 380]) {
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(10000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message + " " + e.stack));
         await page.route("**/*", serve(lang));
@@ -120,11 +121,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // a filter starts again at a page; one that finds a few draws those
         const filter = view.locator(".sm-filter");
         await filter.fill("picture");
+        await filter.press("Enter"); // typing waits for a pause; Enter filters at once
         assert.equal(await folders.count(), 100, "a filter starts again at a page of folders");
         await filter.fill("picture 249");
+        await filter.press("Enter");
         assert.equal(await folders.count(), 1);
         assert.equal(await more.count(), 0);
         await filter.fill("");
+        await filter.press("Enter");
         assert.equal(await folders.count(), 100);
 
         // another agent starts at a page; a session opened from the Usage

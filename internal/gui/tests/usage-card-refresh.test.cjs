@@ -85,6 +85,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", e => errors.push(e.message));
       const state = { quotas: fixtures(Date.now()), gets: 0, refreshes: [], nameOnRefresh: !named };
@@ -97,6 +98,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const read = claude.locator(".quota-read");
       await read.waitFor();
       assert.ok((await read.textContent()).includes(deferredWords[lang]), "a request not made was described as failed");
+      // a failed read's stand-in says why it failed (tmr11235 on X:
+      // agy-cli's quota stood days old with no reason); a deferred one
+      // failed at nothing
+      const why = "agy usage query timed out.";
+      const asOf = state.quotas[0].readAt;
+      assert.ok((await page.evaluate(q => asOfText(q), { asOf, readError: why })).endsWith(" · " + why), "a failed read hid why");
+      assert.ok(!(await page.evaluate(q => asOfText(q), { asOf, readError: why, readDeferred: true })).includes(why));
+      assert.ok(!(await page.evaluate(q => asOfText(q, true), { asOf, readError: why })).includes(why), "the short line stays short");
 
       let release, readStarted;
       const started = new Promise(r => { readStarted = r; });
@@ -197,6 +206,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1250, height: 900 }, reducedMotion: "no-preference" });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
     let release, releaseRead, readStarted;
@@ -250,6 +260,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", e => errors.push(e.message));
       const now = Date.now();
@@ -288,6 +299,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // short, so the page scrolls and a click that moved it would show
       const page = await (await browser.newContext({ viewport: { width: 900, height: 420 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       let open;
       const state = { quotas: fixtures(Date.now()), gets: 0, refreshes: [], gate: new Promise((r) => { open = r; }) };

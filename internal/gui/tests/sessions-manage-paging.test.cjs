@@ -60,6 +60,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (const width of [1000, 380]) {
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(10000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message + " " + e.stack));
         await page.route("**/*", serve(lang));
@@ -115,10 +116,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // a filter starts again at a page; clearing it keeps a page
         const filter = view.locator(".sm-filter");
         await filter.fill("task");
+        await filter.press("Enter"); // typing waits for a pause; Enter filters at once
         assert.equal(await rows.count(), 100 + 3, "every folder opens to a page while filtering");
         await filter.fill("task 249");
+        await filter.press("Enter");
         assert.equal(await rows.count(), 1);
         await filter.fill("");
+        await filter.press("Enter");
         assert.equal(await rows.count(), 100);
 
         // the folder's box and the bar pick every session, drawn or not

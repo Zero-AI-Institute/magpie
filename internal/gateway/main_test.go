@@ -9,6 +9,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/coderun"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/gwtool"
@@ -24,11 +25,20 @@ import (
 const standInsEnv = "MAGPIE_GATEWAY_TEST_STAND_INS"
 
 func TestMain(m *testing.M) {
+	if coderun.Helping() {
+		// a run_code script: the test binary is the helper (hubCodeRun)
+		os.Exit(coderun.Main())
+	}
 	serveRotation()
 	groupsServed = provider.ServeGroups()
 	serveMiddleware()
 	searchOn = gwtool.Serve(gwtool.WebSearch)
 	limitsOn = gwbudget.Limit(budget.Limiter{})
+	// the test binary is no magpie: it runs no claude-tui-helper
+	claudeTUIRuns = false
+	// the tests serve their Remote magpie from this process, which is
+	// then this magpie itself (remote_self_test.go turns it on again)
+	provider.LeaveOutSelf = false
 	code, err := isolatedTests(m)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

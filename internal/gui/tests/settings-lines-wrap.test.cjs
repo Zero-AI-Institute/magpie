@@ -16,7 +16,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn, openPart } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, openPart, reach } = require("./reader.cjs");
 
 const assets = path.resolve(process.env.MAGPIE_WRAP_ASSETS || path.join(__dirname, "../assets"));
 
@@ -69,6 +69,9 @@ const measure = (scope) => {
     const rb = r.getBoundingClientRect();
     for (const s of r.querySelectorAll(".who .sub")) {
       if (!shown(s) || !s.textContent.trim()) continue;
+      // an explanation kept out of sight shows whole in its card on hover
+      // (settings-hints.test.cjs)
+      if (getComputedStyle(s).getPropertyValue("--hint").trim() === "1") continue;
       const cs = getComputedStyle(s);
       if (s.scrollWidth > s.clientWidth + 1 || cs.whiteSpace === "nowrap") cut.push({ text: s.textContent.slice(0, 80), scroll: s.scrollWidth, width: s.clientWidth, whiteSpace: cs.whiteSpace });
     }
@@ -89,6 +92,7 @@ for (const engine of engines) {
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(8000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }));
@@ -114,7 +118,19 @@ for (const engine of engines) {
       await openPart(page, "models");
       for (const sel of ["#imagesList .image-gen-vendor", "#visionMcpRow .sub", ".searcher-row .who > .sub"]) {
         const s = page.locator(sel).first();
-        await s.waitFor();
+        await s.waitFor({ state: "attached" });
+        if (await s.evaluate((e) => getComputedStyle(e).getPropertyValue("--hint").trim() === "1")) {
+          // out of sight at rest: the row's card shows it whole
+          // wheeled into sight: a scroll by code is put back (#6353)
+          const name = s.locator("xpath=ancestor::div[contains(concat(' ', @class, ' '), ' pref ')][1]").locator(":scope > .who > .name");
+          await reach(page, name);
+          await name.hover();
+          const card = page.locator(".set-hint.on");
+          await card.waitFor();
+          assert.ok((await card.textContent()).includes((await s.textContent()).trim()), `${sel} isn't in its card`);
+          await page.mouse.move(0, 0);
+          continue;
+        }
         const whole = await s.evaluate((e) => e.scrollWidth <= e.clientWidth + 1 && getComputedStyle(e).whiteSpace !== "nowrap");
         assert.equal(whole, true, `${sel} is cut`);
       }

@@ -11,6 +11,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // codexSignInToken is Codex's ChatGPT sign-in as Codex keeps it, which
@@ -34,6 +36,17 @@ var codexSignInToken = provider.CodexSignInAsKept
 // what to do.
 func codexOwnOffMagpie(r *http.Request, body []byte, model string) (to *http.Request, why string) {
 	if model == "" || strings.Contains(model, "/") || !local(r) {
+		return nil, ""
+	}
+	// one of Codex's hidden side calls on its own model that a setting
+	// sends elsewhere — a thread's title or description, a composer
+	// prediction, the app's prompt suggestions — is magpie's to answer where it stands (codexTitlesTo
+	// and its siblings, further down handle), never to put on Codex's
+	// ChatGPT sign-in: with no sign-in to be had the request was answered
+	// 404 and Codex named the thread after its first message, whatever the
+	// settings said (#4590). With no setting magpie has nothing of its own
+	// to answer it with, and it goes on the sign-in as the thread's turns do.
+	if codexSideSet(requestCallKind(r.Header, requestSessionMetadata(r.Header, body))) {
 		return nil, ""
 	}
 	if !fromCodex(r.Header) && agentOf(r) != "codex" {
@@ -105,6 +118,23 @@ func codexOwnModel(model string) bool {
 		if m.ID == model {
 			return true
 		}
+	}
+	return false
+}
+
+// codexSideSet: a side call of this kind has a setting naming where it
+// goes (a model, or "off"). A thread's summary has none.
+func codexSideSet(kind string) bool {
+	st := settings.Load()
+	switch {
+	case isTitleKind(kind):
+		return st.CodexTitles != ""
+	case isDescriptionKind(kind):
+		return st.CodexDescriptions != ""
+	case isPredictionKind(kind):
+		return st.CodexPredictions != ""
+	case usage.PurposeOf(kind) == "kind:ambient_suggestions":
+		return st.CodexSuggestions != ""
 	}
 	return false
 }

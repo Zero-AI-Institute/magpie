@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -170,6 +171,13 @@ type responsesSocket struct {
 	writeMu sync.Mutex
 	turns   []heldTurn // the newest last
 
+	// the turn state the last reply said, and the turn it is for
+	// (client_metadata.turn_id): Codex continues a turn on its socket by
+	// previous_response_id and sends no state, the socket being the
+	// routing, while magpie sends each request on whole; the state goes
+	// with each later request of that turn, as Codex sends it over HTTP
+	stateTurn, turnState string
+
 	mu      sync.Mutex
 	away    bool // the gateway is ending: close after this turn
 	turning bool
@@ -198,7 +206,12 @@ func (s *Server) serveResponsesSocket(w http.ResponseWriter, r *http.Request) bo
 		log.Printf("responses socket from %s: %v", r.RemoteAddr, err)
 		return true
 	}
-	c.SetReadLimit(defaultBodyLimit)
+	// a turn on a new socket is the conversation whole (codexBodyLimit)
+	most := int64(defaultBodyLimit)
+	if strings.HasPrefix(r.URL.Path, CodexPath+"/") {
+		most = s.codexLimitOf()
+	}
+	c.SetReadLimit(most)
 	sock := &responsesSocket{s: s, o: o, path: r.URL.Path, c: c, ctx: o.ctx}
 	if !s.sockets.add(sock) {
 		c.Close(websocket.StatusGoingAway, "magpie is restarting")
@@ -398,11 +411,35 @@ func (rs *responsesSocket) held(id string) ([]json.RawMessage, bool) {
 	return nil, false
 }
 
-func (rs *responsesSocket) keep(t heldTurn) {
+// keep holds the reply id ends: the conversation before this turn (held
+// already), the turn's own input and the reply's items. The input is
+// copied out of the frame it was read from: a view kept it whole, with
+// Codex's tools and instructions, on every turn a socket held, ~39 MB of
+// a long session's live heap.
+func (rs *responsesSocket) keep(id string, prior, fresh, reply []json.RawMessage) {
+	t := heldTurn{id: id, items: make([]json.RawMessage, 0, len(prior)+len(fresh)+len(reply))}
+	t.items = append(t.items, prior...)
+	t.items = append(t.items, ownItems(fresh)...)
+	t.items = append(t.items, reply...)
 	rs.turns = append(rs.turns, t)
 	if len(rs.turns) > socketKeep {
 		rs.turns = append(rs.turns[:0:0], rs.turns[len(rs.turns)-socketKeep:]...)
 	}
+}
+
+// ownItems are items copied into one buffer of their own.
+func ownItems(items []json.RawMessage) []json.RawMessage {
+	n := 0
+	for _, it := range items {
+		n += len(it)
+	}
+	buf := make([]byte, 0, n)
+	out := make([]json.RawMessage, len(items))
+	for i, it := range items {
+		buf = append(buf, it...)
+		out[i] = buf[len(buf)-len(it) : len(buf) : len(buf)]
+	}
+	return out
 }
 
 // turn serves one response.create.
@@ -420,6 +457,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		return
 	}
 	input := fresh
+	var held []json.RawMessage
 	if raw := q["previous_response_id"]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		var id string
 		json.Unmarshal(raw, &id)
@@ -430,7 +468,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 				"Previous response with id '"+id+"' not found.", "previous_response_id")
 			return
 		}
-		input = append(prior[:len(prior):len(prior)], fresh...)
+		held, input = prior, append(prior[:len(prior):len(prior)], fresh...)
 		rs.continued++
 	}
 	// a warmup (generate false) asks for no reply: Codex sends it with
@@ -453,7 +491,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		resp["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 		b, _ = json.Marshal(map[string]any{"type": "response.completed", "response": resp})
 		if rs.write(ctx, b) == nil {
-			rs.keep(heldTurn{id: id, items: input})
+			rs.keep(id, held, fresh, nil)
 		}
 		return
 	}
@@ -461,20 +499,24 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 	delete(q, "type")
 	delete(q, "previous_response_id")
 	delete(q, "generate")
-	in, err := json.Marshal(input)
-	if err != nil {
-		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_value", err.Error(), "input")
-		return
-	}
-	q["input"] = in
-	body, err := json.Marshal(q)
+	// WebSocket mode is always streamed; clients omit the HTTP stream field.
+	q["stream"] = json.RawMessage("true")
+	body, err := turnBody(q, input)
 	if err != nil {
 		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_json", err.Error(), "")
 		return
 	}
 	rs.sent += int64(len(body))
+	if socketTurnBody != nil {
+		socketTurnBody(body)
+	}
+	turnID := gjson.GetBytes(body, "client_metadata.turn_id").String()
 	req := rs.request(ctx, body)
-	out := &socketTurnWriter{rs: rs, ctx: ctx, run: t, h: http.Header{}}
+	if req.Header.Get("X-Codex-Turn-State") == "" && turnID != "" && turnID == rs.stateTurn {
+		req.Header.Set("X-Codex-Turn-State", rs.turnState)
+	}
+	out := &socketTurnWriter{rs: rs, ctx: ctx, run: t, h: http.Header{},
+		codex: fromCodex(req.Header) || agentOf(req) == "codex"}
 	rs.o.via.ServeHTTP(out, req)
 	out.finish()
 	if ctx.Err() != nil {
@@ -484,9 +526,88 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		t.cut = true
 		return
 	}
-	if out.id != "" && out.completed {
-		rs.keep(heldTurn{id: out.id, items: append(input[:len(input):len(input)], out.items...)})
+	if v := out.h.Get("X-Codex-Turn-State"); v != "" && turnID != "" {
+		rs.stateTurn, rs.turnState = turnID, v
 	}
+	if out.id != "" && out.completed {
+		rs.keep(out.id, held, fresh, out.items)
+	}
+}
+
+// socketTurnBody, set by the tests, is handed each body a turn is served
+// with, to see that nothing keeps it once the turn is over.
+var socketTurnBody func(body []byte)
+
+// turnBody is json.Marshal(q) with input, as json.Marshal writes it, for
+// q's input, written once into a slice of about its size. A turn wrote
+// its conversation with json.Marshal twice, the list and then q around
+// it, through encoding/json's scanner a byte at a time and a buffer that
+// doubles and is copied out: about five copies of a long conversation on
+// every turn, the garbage that sets the peak (marshalRaw has the rest).
+func turnBody(q map[string]json.RawMessage, input []json.RawMessage) ([]byte, error) {
+	q["input"] = nil
+	n := 2
+	keys := make([]string, 0, len(q))
+	for k, raw := range q {
+		n += len(k) + escapedSize(raw) + 4
+		keys = append(keys, k)
+	}
+	for _, raw := range input {
+		n += escapedSize(raw) + 1
+	}
+	slices.Sort(keys)
+	dst := make([]byte, 0, n)
+	dst = append(dst, '{')
+	ok := true
+	for i, k := range keys {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		if dst, ok = appendJSONKey(dst, k, true); !ok {
+			break
+		}
+		dst = append(dst, ':')
+		if k != "input" {
+			if dst, ok = appendRawJSON(dst, q[k], true); !ok {
+				break
+			}
+			continue
+		}
+		if input == nil {
+			dst = append(dst, "null"...)
+			continue
+		}
+		dst = append(dst, '[')
+		for j, raw := range input {
+			if j > 0 {
+				dst = append(dst, ',')
+			}
+			if dst, ok = appendRawJSON(dst, raw, true); !ok {
+				break
+			}
+		}
+		if !ok {
+			break
+		}
+		dst = append(dst, ']')
+	}
+	if ok {
+		return append(dst, '}'), nil
+	}
+	// a value encoding/json refuses: it says why
+	in, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	q["input"] = in
+	return json.Marshal(q)
+}
+
+// escapedSize is about what appendRawJSON writes of raw: its length, and
+// the five bytes each <, > and & grows by as \u003c and the like. Code
+// is full of them, and a slice that grows doubles.
+func escapedSize(raw []byte) int {
+	return len(raw) + 5*(bytes.Count(raw, []byte("<"))+bytes.Count(raw, []byte(">"))+bytes.Count(raw, []byte("&")))
 }
 
 // request is the POST a turn stands for: the upgrade's own request, its
@@ -523,8 +644,11 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 	req.Header.Set("Accept", "text/event-stream")
 	// what Codex says in client_metadata here and in a header over HTTP
 	// (codexSocketMessage, the other way)
+	// — the turn state in the header alone, which goes on only to the
+	// account that was given it (codex_turnstate.go)
 	if v := gjson.GetBytes(body, `client_metadata.x-codex-turn-state`).String(); v != "" {
 		req.Header.Set("X-Codex-Turn-State", v)
+		body = withoutClientMetadata(body, "x-codex-turn-state")
 	}
 	if strings.EqualFold(gjson.GetBytes(body, `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`).String(), "true") {
 		req.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
@@ -541,10 +665,11 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 // as the socket's frames: each event of a stream as one, an error as an
 // error frame.
 type socketTurnWriter struct {
-	rs  *responsesSocket
-	ctx context.Context
-	run *socketTurnRun
-	h   http.Header
+	rs    *responsesSocket
+	ctx   context.Context
+	run   *socketTurnRun
+	h     http.Header
+	codex bool // the client is Codex's own: the backend's events are for it
 
 	status int
 	stream bool
@@ -618,6 +743,12 @@ func (w *socketTurnWriter) startStream() {
 // response.metadata, the model list's tag in codex.response.metadata,
 // and the account's windows in codex.rate_limits.
 func (w *socketTurnWriter) headerFrames() [][]byte {
+	// Codex's own events, which a typed client on the socket reads as
+	// unknown variants and gives up on (as on the HTTP route, the same
+	// guard in passthrough)
+	if !w.codex {
+		return nil
+	}
 	var out [][]byte
 	meta := map[string]string{}
 	for _, k := range []string{"x-codex-turn-state", "openai-model", "x-reasoning-included"} {

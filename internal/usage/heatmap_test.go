@@ -198,6 +198,7 @@ func TestHeatmapAfterACallAddsUpOnlyWhatChanged(t *testing.T) {
 // session file of old and new calls, and the pairing kept no longer than
 // heatOldFresh, or once a settled file changes.
 func TestHeatmapAfterACallPairsOnlyTheLastDays(t *testing.T) {
+	pairAtOnce(t)
 	pageHome(t)
 	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
 	cut := time.Date(2026, 9, 28, 0, 0, 0, 0, time.Local)
@@ -332,6 +333,7 @@ func TestHeatmapAfterACallPairsOnlyTheLastDays(t *testing.T) {
 // the whole history's pairing was the cold start's peak. A settled file
 // changed since, or another filter, pairs every chunk again.
 func TestHeatmapSettledDaysFromDisk(t *testing.T) {
+	pairAtOnce(t)
 	pageHome(t)
 	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
 	write := func(id string, at time.Time, input int) string {
@@ -402,5 +404,37 @@ func TestHeatSettledKeyNamesTheZone(t *testing.T) {
 	}
 	if key(Filter{}) == a || key(Filter{Zone: time.FixedZone("Y", 7200)}) == a {
 		t.Fatal("another zone, the same key")
+	}
+}
+
+// A probe's chunk (MCP and search calls) is made again for each query and
+// has no serial. When it is among the settled days the count is still kept
+// on disk, named by its rows, or every refresh counts the days again.
+func TestHeatSettledKeyNamesAProbeChunk(t *testing.T) {
+	cut := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	d := heatDiskRef{root: "r", meta: "m"}
+	probe := func(input int) *rowChunk {
+		c := &rowChunk{}
+		for i := 1; i <= 3; i++ {
+			c.add(Row{Record: Record{Time: cut.Add(-time.Duration(i) * time.Hour), Agent: "claude", Model: "m", Input: i * input}}, fmt.Sprint("msg", i), int64(i), false)
+		}
+		return c
+	}
+	key := func(c *rowChunk) string {
+		if c.serial != 0 {
+			t.Fatalf("serial %d, want a probe's 0", c.serial)
+		}
+		k, ok := heatSettledKey(d, cut, time.Time{}, Filter{}, nil, [3][]*rowChunk{{c}}, heatSum{})
+		if !ok {
+			t.Fatal("a probe's chunk left the settled days unnamed")
+		}
+		return k
+	}
+	a, b := key(probe(10)), key(probe(10))
+	if a != b {
+		t.Fatalf("the same rows, two keys: %s, %s", a, b)
+	}
+	if key(probe(11)) == a {
+		t.Fatal("other rows, the same key")
 	}
 }

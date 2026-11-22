@@ -49,7 +49,7 @@ func pairSerials(sets ...[]*rowChunk) ([]uint64, bool) {
 func unnamedSerial(c *rowChunk) uint64 {
 	h := mix(6, uint64(len(c.Rows)))
 	for i := range c.Rows {
-		h = mix(h, uint64(c.Rows[i].Order), uint64(c.Rows[i].Time.UnixNano()))
+		h = mix(h, uint64(c.Rows[i].Order), uint64(c.Rows[i].Time().UnixNano()))
 	}
 	return h | 1
 }
@@ -57,6 +57,7 @@ func unnamedSerial(c *rowChunk) uint64 {
 // pairRowsMemo is pairRows, through old when it paired these chunks over
 // the same window. The memo it returns is for the next call (nil: none).
 func pairRowsMemo(p Period, now time.Time, gateways, chunks, others []*rowChunk, identities map[string]sessions.CodexIdentity, old *pairMemo) (*pairedRows, *pairMemo) {
+	priceStubs(gateways)
 	since, until := p.Since(now), p.Until(now)
 	serials, ok := pairSerials(gateways, chunks, others)
 	if !ok {
@@ -67,6 +68,23 @@ func pairRowsMemo(p Period, now time.Time, gateways, chunks, others []*rowChunk,
 	}
 	ps := pairRows(p, now, gateways, chunks, others, identities)
 	return ps, memoOf(ps, serials, append(append(slices.Clone(gateways), chunks...), others...))
+}
+
+// pairEvery is the pairing of every row of these chunks, as the whole
+// history's page and Codex's effort pair them, through and for their memo
+// (cache.pairs, All's), visited from since on. The heatmap paired its
+// year apart: the same chunks for most histories, and a third pairing of
+// all of them on a cold start beside the page's and the effort's, the
+// last and highest of the footprint's peaks (#2278). A call is paired to
+// its session row as the whole history pairs it; only what is counted is
+// the window's.
+func pairEvery(since, now time.Time, gateways, chunks, others []*rowChunk, identities map[string]sessions.CodexIdentity, cache *partCache) *pairedRows {
+	ps, next := pairRowsMemo(All, now, gateways, chunks, others, identities, cache.pairs)
+	if next != cache.pairs {
+		cache.pairsNext = next
+	}
+	ps.since = since
+	return ps
 }
 
 // memoOf is ps as a memo; originals are the chunks ps.all was cloned from.

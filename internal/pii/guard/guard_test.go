@@ -61,7 +61,7 @@ func dir(t *testing.T) string {
 // model's tokenizer.json (testdata/tokens.json: ids, and offsets in
 // characters).
 func TestTokenizerMatchesHF(t *testing.T) {
-	tk, err := loadTokenizer(filepath.Join(dir(t), "tokenizer.json"))
+	tk, err := loadTokenizer(filepath.Join(dir(t), "tokenizer.json"), vocabSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +111,39 @@ func TestModelFinds(t *testing.T) {
 	want := map[string]string{"张三": "private_person", "13800138000": "phone", "zhangsan@example.com": "email"}
 	if !reflect.DeepEqual(have, want) {
 		t.Fatalf("found %v, want %v", have, want)
+	}
+}
+
+// The model reads text that isn't valid UTF-8, as an embeddings input
+// with a stray byte came to it (#4553: "hello \xff" panicked in the
+// tokenizer and ended magpie), and finds in the valid text around it
+// what it finds without the byte, with every span inside the text.
+func TestModelFindsAroundMalformedBytes(t *testing.T) {
+	m, err := Load(dir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ml = nil
+	for _, text := range []string{
+		"hello \xff", "\xff", "\xc3", "\xed\xa0\x80", "\xf0\x9f",
+		"联系人：张三\xff，电话 13800138000\xc3。",
+	} {
+		have := map[string]string{}
+		phone := false
+		for _, s := range m.Find(text) {
+			if s.Start < 0 || s.End > len(text) || s.Start >= s.End {
+				t.Fatalf("Find(%q): span %+v is out of the text", text, s)
+			}
+			if s.Score >= MinScore {
+				have[text[s.Start:s.End]] = s.Label
+				// a stray byte against the number is a character of its
+				// word, so the span may take it too
+				phone = phone || s.Label == "phone" && strings.Contains(text[s.Start:s.End], "13800138000")
+			}
+		}
+		if strings.Contains(text, "13800138000") && !phone {
+			t.Errorf("Find(%q) = %v, want the phone number", text, have)
+		}
 	}
 }
 
